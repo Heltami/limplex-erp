@@ -1,0 +1,11 @@
+streamlit
+pandas
+openpyxl
+plotly
+reportlab
+psycopg2-binary
+SQLAlchemy
+Pillow
+bcrypt
+python-dotenv
+requests
