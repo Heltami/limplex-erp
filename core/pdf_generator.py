@@ -92,7 +92,7 @@ def gerar_pdf_pedido_mestre(df_cons, empresa_info=None, usuario_emissao=None):
 
 
 # --- 6.1 (C) PDF DE ORÇAMENTO / PEDIDO INDIVIDUAL PARA O CLIENTE ---
-def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total=0.0, empresa_info=None, usuario_emissao=None, pedido_id_str=None, cliente_cnpj="", cliente_end="", data_pedido="", cond_pag="", **kwargs):
+def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total=0.0, empresa_info=None, usuario_emissao=None, pedido_id_str=None, cliente_cnpj="", cliente_end="", data_pedido="", data_previsao="", cond_pag="", **kwargs):
     if empresa_info is None: empresa_info = {}
     if not usuario_emissao: usuario_emissao = "Sistema"
     
@@ -152,10 +152,18 @@ def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total
 
     story.append(Paragraph(f"<b>PROPOSTA COMERCIAL #{exibir_id}</b>", header_style))
     
+    # --- A MÁGICA ACONTECE AQUI: INJEÇÃO DINÂMICA DE DADOS ---
     info_pedido = []
-    if data_pedido and str(data_pedido).strip(): info_pedido.append(f"<b>Data:</b> {str(data_pedido)[:10]}")
-    if cond_pag and str(cond_pag).strip(): info_pedido.append(f"<b>Pagamento:</b> {str(cond_pag).strip()}")
-    if info_pedido: story.append(Paragraph(" | ".join(info_pedido), normal_style))
+    if data_pedido and str(data_pedido).strip(): 
+        info_pedido.append(f"<b>Data:</b> {str(data_pedido)[:10]}")
+    if data_previsao and str(data_previsao).strip(): 
+        # Adiciona a previsão de entrega com destaque (negrito)
+        info_pedido.append(f"<b>Previsão de Entrega:</b> {str(data_previsao).strip()}")
+    if cond_pag and str(cond_pag).strip(): 
+        info_pedido.append(f"<b>Pagamento:</b> {str(cond_pag).strip()}")
+        
+    if info_pedido: 
+        story.append(Paragraph(" | ".join(info_pedido), normal_style))
         
     story.append(Spacer(1, 5))
     
@@ -174,7 +182,6 @@ def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total
     if df_itens is not None and not df_itens.empty:
         for _, row in df_itens.iterrows():
             
-            # CAÇADOR ABSOLUTO DE PRODUTO
             prod_desc = "Produto N/D"
             for c in row.index:
                 c_str = str(c).lower()
@@ -183,7 +190,6 @@ def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total
                         prod_desc = str(row[c])
                         break
             
-            # CAÇADOR DE QUANTIDADE
             qtd_val = 1
             for c in row.index:
                 if 'qtd' in str(c).lower() or 'quant' in str(c).lower():
@@ -191,7 +197,6 @@ def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total
             try: qtd = int(qtd_val)
             except: qtd = 1
             
-            # CAÇADOR DE PREÇO
             preco_val = 0.0
             for c in row.index:
                 if 'pre' in str(c).lower() or 'unit' in str(c).lower() or 'valor' in str(c).lower():
@@ -199,7 +204,6 @@ def gerar_pdf_pedido(pedido_id=None, cliente_nome="", df_itens=None, valor_total
             try: preco = float(preco_val)
             except: preco = 0.0
             
-            # CAÇADOR DE SUBTOTAL
             sub_val = qtd * preco
             for c in row.index:
                 if 'sub' in str(c).lower() or 'tot' in str(c).lower():

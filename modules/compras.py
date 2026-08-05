@@ -3,23 +3,20 @@ import pandas as pd
 import time
 from datetime import datetime
 
-from core.database import conectar_bd
 from core.utils import registrar_auditoria
 from core.pdf_generator import (
     gerar_pdf_pedido_mestre, gerar_pdf_pedido_fornecedor, gerar_pdf_pickup_entrega
 )
 
+# IMPORTA O NOVO REPOSITÓRIO!
+from repositories import compras_repo
+
 def render():
     st.title("📦 Central de Compras e Logística")
     st.markdown("Reúna todas as vendas confirmadas (Fase: **Pedido**) para gerar as **Ordens de Compra** aos Fornecedores e organizar a logística de entrega.")
     
-    conn_global = conectar_bd()
-    try:
-        df_empresa = pd.read_sql_query("SELECT * FROM configuracoes LIMIT 1", conn_global)
-        empresa_dados = df_empresa.iloc[0].to_dict() if not df_empresa.empty else {}
-    except:
-        empresa_dados = {}
-    conn_global.close()
+    # 1. Puxa os dados da empresa via repositório
+    empresa_dados = compras_repo.obter_dados_empresa()
 
     aba_cons1, aba_cons2 = st.tabs(["⏳ 1. Compras Pendentes (A Consolidar)", "🚚 2. Logística Operacional (Lote Consolidado)"])
 
@@ -29,26 +26,11 @@ def render():
     with aba_cons1:
         st.subheader("Itens Pendentes de Compra (Baseado nas Vendas)")
         
-        conn = conectar_bd()
-        df_cons = pd.read_sql_query('''
-            SELECT f.nome_fantasia as "Fornecedor", 
-                   p.sku as "Código", 
-                   p.descricao as "Produto", 
-                   SUM(i.quantidade) as "Qtd Total", 
-                   i.custo_unitario as "Custo Unitário", 
-                   SUM(i.subtotal_custo) as "Custo Total" 
-            FROM itens_pedido i 
-            JOIN pedidos ped ON i.pedido_id = ped.id 
-            JOIN produtos p ON i.produto_id = p.id_produto 
-            LEFT JOIN fornecedores f ON p.id_fornecedor = f.id_fornecedor 
-            WHERE ped.status = 'Pedido' 
-            GROUP BY f.nome_fantasia, p.sku, p.descricao, i.custo_unitario
-            ORDER BY f.nome_fantasia, p.descricao
-        ''', conn)
-        conn.close()
+        # 2. Busca itens para o saco azul via repositório
+        df_cons = compras_repo.listar_itens_pendentes_compra()
         
         if df_cons.empty:
-            st.info("ℹ️ Nenhum item pendente. Altere o status dos orçamentos para 'Pedido' no Módulo de Pedidos.")
+            st.info("ℹ️ Nenhum item pendente. Altere o status dos orçamentos para 'Pedido' no Módulo de Vendas.")
         else:
             st.dataframe(
                 df_cons.style.format({"Custo Unitário": "R$ {:.2f}", "Custo Total": "R$ {:.2f}"}), 
@@ -70,10 +52,12 @@ def render():
                     empresa_info=empresa_dados,
                     usuario_emissao=st.session_state.get('usuario_logado', 'Sistema')
                 )
+                
+                # Nomenclatura Oficial: Pedido Mestre
                 st.download_button(
                     label="📄 Pedido Mestre (Todos)",
                     data=pdf_mestre,
-                    file_name=f"pedido_mestre_global_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    file_name=f"MESTRE_LIMPLEX_{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf",
                     use_container_width=True,
                     help="Documento interno contendo a soma de todos os fornecedores."
@@ -81,12 +65,12 @@ def render():
                 
             with c_indiv:
                 st.markdown("**2. Enviar ao Fornecedor**")
-                fornecedores_unicos = df_cons['Fornecedor'].fillna("SEM FORNECEDOR DEFINIDO").unique().tolist()
+                fornecedores_unicos = df_cons['Fornecedor'].fillna("SEM_FORNECEDOR").unique().tolist()
                 
                 forn_selecionado = st.selectbox("Escolha o Fornecedor:", fornecedores_unicos, label_visibility="collapsed")
                 
                 if forn_selecionado:
-                    df_forn_especifico = df_cons[df_cons['Fornecedor'].fillna("SEM FORNECEDOR DEFINIDO") == forn_selecionado]
+                    df_forn_especifico = df_cons[df_cons['Fornecedor'].fillna("SEM_FORNECEDOR") == forn_selecionado]
                     pdf_fornecedor = gerar_pdf_pedido_fornecedor(
                         fornecedor_nome=forn_selecionado, 
                         df_forn=df_forn_especifico, 
@@ -94,11 +78,12 @@ def render():
                         usuario_emissao=st.session_state.get('usuario_logado', 'Sistema')
                     )
                     
-                    nome_ficheiro_forn = str(forn_selecionado).replace(" ", "_").lower()
+                    # Nomenclatura Oficial: Ordem de Compra
+                    nome_ficheiro_forn = str(forn_selecionado).replace(" ", "_").upper()
                     st.download_button(
                         label=f"📄 Gerar Ordem: {forn_selecionado}",
                         data=pdf_fornecedor,
-                        file_name=f"ordem_compra_{nome_ficheiro_forn}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                        file_name=f"ORDEM_{nome_ficheiro_forn}_LIMPLEX_{datetime.now().strftime('%Y%m%d')}.pdf",
                         mime="application/pdf",
                         use_container_width=True,
                         type="primary"
@@ -108,15 +93,14 @@ def render():
                 st.markdown("**3. Fechamento Mensal**")
                 with st.popover("🚀 Consolidar Lote Operacional", use_container_width=True):
                     st.markdown("⚠️ **Atenção:** Ao confirmar, todos os 'Pedidos' passarão para o status **Consolidado**.")
-                    if st.button("✔️ Sim, Fechar e Consolidar", use_container_width=True):
-                        conn = conectar_bd()
-                        cursor = conn.cursor()
-                        cursor.execute("UPDATE pedidos SET status = 'Consolidado' WHERE status = 'Pedido'")
-                        conn.commit()
-                        registrar_auditoria(st.session_state.usuario_logado, "Fechou o lote e consolidou todos os Pedidos.")
-                        conn.close()
-                        st.success("✅ Lote consolidado! Avance para a Aba 2.")
-                        time.sleep(1.5); st.rerun()
+                    if st.button("✔️ Sim, Fechar e Consolidar", use_container_width=True, key="btn_fechar_lote"):
+                        sucesso, msg = compras_repo.consolidar_pedidos_pendentes()
+                        if sucesso:
+                            registrar_auditoria(st.session_state.usuario_logado, "Fechou o lote e consolidou todos os Pedidos.")
+                            st.success("✅ Lote consolidado! Avance para a Aba 2.")
+                            time.sleep(1.5); st.rerun()
+                        else:
+                            st.error(f"Erro na Base de Dados: {msg}")
 
     # ==========================================
     # ABA 2: LOGÍSTICA E ROTEIRIZAÇÃO (CONSOLIDADOS)
@@ -124,20 +108,8 @@ def render():
     with aba_cons2:
         st.subheader("Painel de Roteirização e Entregas (Lote Atual)")
         
-        conn = conectar_bd()
-        
-        # Puxa os dados dos pedidos consolidados cruzando com a tabela de clientes
-        df_peds_cons = pd.read_sql_query('''
-            SELECT p.id as id_pedido, 
-                   p.cliente_id as ped_cliente_id, 
-                   p.data_criacao, 
-                   p.valor_total as valor_pedido, 
-                   c.*
-            FROM pedidos p 
-            JOIN clientes c ON p.cliente_id = c.id_cliente 
-            WHERE p.status = 'Consolidado' 
-            ORDER BY c.id_cliente
-        ''', conn)
+        # 3. Busca pedidos consolidados via repositório
+        df_peds_cons = compras_repo.listar_pedidos_consolidados()
         
         romaneio_lista = []
         for _, row in df_peds_cons.iterrows():
@@ -146,61 +118,48 @@ def render():
             data_compacta = str(row['data_criacao'])[:10].replace("-", "")
             doc_formatado = f"CON{int(cli_id):03d}{data_compacta}{int(pid):03d}"
 
-            # 1. Função auxiliar flexível para encontrar colunas com nomes variados
             def pegar_campo(*opcoes):
                 for op in opcoes:
                     if op in row.index and pd.notna(row[op]) and str(row[op]).strip():
                         return str(row[op]).strip()
                 return ""
 
-            # 2. Montagem do Endereço Completo do Cliente
-            rua_val = pegar_campo('endereco', 'rua', 'logradouro', 'morada')
+            rua_val = pegar_campo('endereco_entrega', 'endereco', 'rua', 'logradouro')
             num_val = pegar_campo('numero', 'num', 'nº')
             bairro_val = pegar_campo('bairro', 'distrito')
-            cid_val = pegar_campo('cidade', 'localidade', 'municipio')
+            cid_val = pegar_campo('cidade', 'municipio')
             est_val = pegar_campo('estado', 'uf')
 
             partes_end = []
             if rua_val: partes_end.append(rua_val)
             if num_val: partes_end.append(f"Nº {num_val}")
             if bairro_val: partes_end.append(bairro_val)
-            if cid_val and est_val:
-                partes_end.append(f"{cid_val}/{est_val}")
-            elif cid_val:
-                partes_end.append(cid_val)
+            if cid_val and est_val: partes_end.append(f"{cid_val}/{est_val}")
+            elif cid_val: partes_end.append(cid_val)
 
             end_final = ", ".join(partes_end) if partes_end else "Endereço não informado"
 
-            # 3. Informações de Contato Completas (Nome, Cargo, Telefone, WhatsApp e E-mail)
             contato_linhas = []
-            
-            nome_ct = pegar_campo('contato', 'responsavel', 'nome_contato', 'pessoa_contato', 'nome', 'responsavel_nome')
+            nome_ct = pegar_campo('contato_principal', 'contato', 'responsavel')
             if nome_ct: contato_linhas.append(f"<b>Nome:</b> {nome_ct}")
-
-            cargo_ct = pegar_campo('cargo', 'funcao', 'papel')
+            cargo_ct = pegar_campo('cargo', 'funcao')
             if cargo_ct: contato_linhas.append(f"<b>Cargo:</b> {cargo_ct}")
-
-            tel_ct = pegar_campo('telefone', 'tel', 'fone')
-            if tel_ct: contato_linhas.append(f"<b>Tel:</b> {tel_ct}")
-
-            wpp_ct = pegar_campo('whatsapp', 'celular', 'cel', 'wpp')
-            if wpp_ct: contato_linhas.append(f"<b>WhatsApp:</b> {wpp_ct}")
-
-            email_ct = pegar_campo('email', 'e-mail', 'correio')
+            tel_ct = pegar_campo('whatsapp_telefone', 'telefone', 'celular')
+            if tel_ct: contato_linhas.append(f"<b>Tel/Wpp:</b> {tel_ct}")
+            email_ct = pegar_campo('email')
             if email_ct: contato_linhas.append(f"<b>E-mail:</b> {email_ct}")
 
             info_contato_final = "<br/>".join(contato_linhas) if contato_linhas else "Não informado"
 
-            # 4. Distância e Tempo
-            dist_val = pegar_campo('distancia_km', 'distancia', 'dist_km', 'km')
+            dist_val = pegar_campo('distancia_km')
             if not dist_val: dist_val = "N/D"
             elif not dist_val.endswith("km"): dist_val += " km"
 
-            tempo_val = pegar_campo('tempo_minutos', 'tempo_min', 'tempo', 'minutos', 'duracao')
+            tempo_val = pegar_campo('tempo_minutos')
             if not tempo_val: tempo_val = "N/D"
             elif not tempo_val.endswith("min"): tempo_val += " min"
 
-            nome_cliente = pegar_campo('razao_social', 'nome_fantasia', 'nome', 'empresa')
+            nome_cliente = pegar_campo('razao_social', 'nome_fantasia')
             if not nome_cliente: nome_cliente = "Cliente N/D"
 
             romaneio_lista.append({
@@ -215,17 +174,8 @@ def render():
             
         df_romaneio = pd.DataFrame(romaneio_lista)
         
-        # Puxa os dados para o Picking de forma limpa
-        df_picking_raw = pd.read_sql_query('''
-            SELECT c.razao_social as "Cliente", p.id as id_pedido, p.cliente_id, p.data_criacao, pr.descricao as "Produto", i.quantidade as "Qtd"
-            FROM itens_pedido i 
-            JOIN pedidos p ON i.pedido_id = p.id 
-            JOIN produtos pr ON i.produto_id = pr.id_produto 
-            JOIN clientes c ON p.cliente_id = c.id_cliente
-            WHERE p.status = 'Consolidado' 
-            ORDER BY c.razao_social, pr.descricao
-        ''', conn)
-        conn.close()
+        # 4. Busca dados de Picking via repositório
+        df_picking_raw = compras_repo.listar_picking_consolidados()
 
         picking_lista = []
         for _, row in df_picking_raw.iterrows():
@@ -244,7 +194,7 @@ def render():
         df_picking = pd.DataFrame(picking_lista)
         
         if df_romaneio.empty:
-            st.info("ℹ️ Nenhum pedido no status 'Consolidado'. Certifique-se de avançar o lote na Aba 1 (clicando em Consolidar Lote) para que os pedidos apareçam aqui.")
+            st.info("ℹ️ Nenhum pedido no status 'Consolidado'. Certifique-se de avançar o lote na Aba 1 para que os pedidos apareçam aqui.")
         else:
             st.markdown("**📄 Documento Unificado: Separação (Picking) e Entrega**")
             st.caption("Um único documento contendo os dados de roteirização e os itens a separar por cliente.")
@@ -256,10 +206,11 @@ def render():
                 usuario_emissao=st.session_state.get('usuario_logado', 'Sistema')
             )
             
+            # Nomenclatura Oficial: Romaneio
             st.download_button(
                 label="🚚 Baixar Documento de Separação e Entrega (PDF)", 
                 data=pdf_unificado, 
-                file_name=f"separacao_entrega_{datetime.now().strftime('%Y%m%d')}.pdf", 
+                file_name=f"ROM_LIMPLEX_{datetime.now().strftime('%Y%m%d')}.pdf", 
                 mime="application/pdf", 
                 use_container_width=True, 
                 type="primary"
@@ -277,12 +228,11 @@ def render():
             st.markdown("---")
             with st.popover("⏪ Reabrir Lote Consolidado", use_container_width=False):
                 st.markdown("Isto irá devolver todos os registos Consolidados para a fase de **Pedido**.")
-                if st.button("✔️ Sim, Reverter Lote Inteiro", type="primary"):
-                    conn = conectar_bd()
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE pedidos SET status = 'Pedido' WHERE status = 'Consolidado'")
-                    conn.commit()
-                    registrar_auditoria(st.session_state.usuario_logado, "Reverteu o lote Consolidado para Pedido.")
-                    conn.close()
-                    st.success("✅ Lote revertido com sucesso! Volte à Aba 1.")
-                    time.sleep(1.5); st.rerun()
+                if st.button("✔️ Sim, Reverter Lote Inteiro", type="primary", key="btn_reverte_lote"):
+                    sucesso, msg = compras_repo.reverter_lote_consolidado()
+                    if sucesso:
+                        registrar_auditoria(st.session_state.usuario_logado, "Reverteu o lote Consolidado para Pedido.")
+                        st.success("✅ Lote revertido com sucesso! Volte à Aba 1.")
+                        time.sleep(1.5); st.rerun()
+                    else:
+                        st.error(f"Erro na Base de Dados: {msg}")

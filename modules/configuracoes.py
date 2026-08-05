@@ -11,8 +11,22 @@ from seguranca import validar_complexidade_senha
 def render():
     st.title("⚙️ Configurações Globais do Sistema")
     st.markdown("Aqui você define a identidade da Limplex, as regras de precificação globais e a segurança do ERP.")
+# --- GARANTE QUE AS COLUNAS FINANCEIRAS EXISTEM NO BANCO ---
+    conn_sec = conectar_bd()
+    cursor_sec = conn_sec.cursor()
+    try:
+        cursor_sec.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS multa_percentual NUMERIC(5,2) DEFAULT 2.00")
+        cursor_sec.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS juros_mensal_percentual NUMERIC(5,2) DEFAULT 1.00")
+        cursor_sec.execute("ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS dias_vencimento_padrao INTEGER DEFAULT 15")
+        conn_sec.commit()
+    except:
+        conn_sec.rollback()
+    finally:
+        cursor_sec.close()
+        conn_sec.close()
+    # -----------------------------------------------------------    
     
-    aba1, aba2, aba3 = st.tabs(["🏢 Identidade da Empresa", "💰 Precificação e Margens", "🛡️ Segurança e Acessos"])
+    aba1, aba2, aba3, aba4 = st.tabs(["🏢 Identidade da Empresa", "💰 Precificação e Margens", "🛡️ Segurança e Acessos", "🏦 Financeiro e Cobrança"])
     
     with aba1:
         conn = conectar_bd()
@@ -410,3 +424,76 @@ def render():
                     st.markdown("<hr style='margin: 0px; opacity: 0.2;'>", unsafe_allow_html=True)
             else:
                 st.info("Nenhum usuário encontrado.")
+    # ==============================================================
+    # ABA 4: FINANCEIRO E COBRANÇAS
+    # ==============================================================
+    with aba4:
+        st.subheader("🏦 Parâmetros para Emissão de Boletos e Cobranças")
+        st.caption("Estes valores serão inseridos automaticamente nas instruções de pagamento e no cálculo de vencimentos do Módulo Financeiro.")
+        
+        # Puxa os dados atualizados especificamente para esta aba
+        conn_fin = conectar_bd()
+        try:
+            df_cfg_fin = pd.read_sql_query("SELECT multa_percentual, juros_mensal_percentual, dias_vencimento_padrao FROM configuracoes LIMIT 1", conn_fin)
+            cfg_fin = df_cfg_fin.iloc[0].to_dict() if not df_cfg_fin.empty else {}
+        except:
+            cfg_fin = {}
+        finally:
+            conn_fin.close()
+
+        with st.form("form_financeiro"):
+            col_b1, col_b2, col_b3 = st.columns(3)
+            
+            multa = col_b1.number_input(
+                "Multa por Atraso (%):", 
+                min_value=0.0, max_value=20.0, 
+                value=float(cfg_fin.get('multa_percentual') or 2.00), 
+                step=0.5,
+                help="Cobrada uma única vez após o vencimento (Padrão: 2.00%)."
+            )
+            
+            juros = col_b2.number_input(
+                "Juros de Mora ao Mês (%):", 
+                min_value=0.0, max_value=20.0, 
+                value=float(cfg_fin.get('juros_mensal_percentual') or 1.00), 
+                step=0.5,
+                help="Cobrado proporcionalmente aos dias de atraso (Padrão: 1.00%)."
+            )
+            
+            dias_vencimento = col_b3.number_input(
+                "Prazo Padrão de Vencimento (Dias):", 
+                min_value=1, max_value=99, 
+                value=int(cfg_fin.get('dias_vencimento_padrao') or 15), 
+                step=1,
+                help="Dias somados à data do faturamento para gerar o vencimento."
+            )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            btn_salvar_fin = st.form_submit_button("💾 Salvar Regras Financeiras", type="primary", use_container_width=True)
+
+            if btn_salvar_fin:
+                conn_upd = conectar_bd()
+                cur_upd = conn_upd.cursor()
+                try:
+                    cur_upd.execute('''
+                        UPDATE configuracoes SET
+                            multa_percentual = %s,
+                            juros_mensal_percentual = %s,
+                            dias_vencimento_padrao = %s
+                        WHERE id = (SELECT id FROM configuracoes LIMIT 1)
+                    ''', (multa, juros, dias_vencimento))
+                    conn_upd.commit()
+                    
+                    if 'usuario_logado' in st.session_state:
+                        from core.utils import registrar_auditoria
+                        registrar_auditoria(st.session_state['usuario_logado'], "Atualizou as regras financeiras (Multa/Juros/Prazos).")
+                        
+                    st.success("✅ Parâmetros financeiros salvos com sucesso!")
+                    time.sleep(1.2)
+                    st.rerun()
+                except Exception as e:
+                    conn_upd.rollback()
+                    st.error(f"Erro ao salvar: {e}")
+                finally:
+                    cur_upd.close()
+                    conn_upd.close()
